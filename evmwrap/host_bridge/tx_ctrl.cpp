@@ -342,7 +342,7 @@ void cached_state::collect_result(bridge_collect_result_fn collect_result_fn,
 		.value_num = changed_values.size(),
 		.logs = added_logs.data(),
 		.log_num = added_logs.size(),
-		.refund = refund,
+		.refund = uint64_t(ret_value->gas_refund),
 		.data_ptr = reinterpret_cast<std::uintptr_t>(payload_data.data()),
 		.internal_tx_calls = internal_tx_calls.data(),
 		.internal_tx_call_num = internal_tx_calls.size(),
@@ -388,9 +388,6 @@ void journal_entry::revert(cached_state* state) {
 		break;
 	case CREATION_COUNTER_INCR:
 		state->_decr_creation_counter(creation_counter_incr.lsb, creation_counter_incr.old_dirty);
-		break;
-	case REFUND_CHG:
-		state->refund = refund_change.old_refund;
 		break;
 	case LOG_QUEUE_ADD:
 		state->pop_log();
@@ -489,7 +486,7 @@ evmc_storage_status tx_control::set_value(uint64_t sequence, const evmc_bytes32&
 	const bytes& origin = cstate.get_origin_value(sequence, key);
 	//If current value equals new value (this is a no-op), SLOAD_GAS is deducted.
 	if(e.prev_value == new_value) {
-		return EVMC_STORAGE_UNCHANGED;
+		return EVMC_STORAGE_ASSIGNED;
 	}
 	//If current value does not equal new value:
 	//If original value equals current value, that is, 
@@ -497,15 +494,14 @@ evmc_storage_status tx_control::set_value(uint64_t sequence, const evmc_bytes32&
 	if(origin == e.prev_value) {
 		//If original value is 0, SSTORE_SET_GAS is deducted.
 		if(origin.size() == 0) {
-			return EVMC_STORAGE_ADDED;
+			return EVMC_STORAGE_ADDED; //0 -> 0 -> Z
 		} else {
 		//Otherwise, SSTORE_RESET_GAS gas is deducted. If new value is 0, add SSTORE_CLEARS_SCHEDULE
 		//gas to refund counter.
 			if(new_value.size() == 0) {
-				add_refund(SSTORE_CLEARS_SCHEDULE);
-				return EVMC_STORAGE_DELETED;
+				return EVMC_STORAGE_DELETED;  // X -> X -> 0  refund=c.clear
 			} else {
-				return EVMC_STORAGE_MODIFIED;
+				return EVMC_STORAGE_MODIFIED; // X -> X -> Z
 			}
 		}
 	//If original value does not equal current value (this storage slot is dirty), SLOAD_GAS gas is deducted.
@@ -515,40 +511,33 @@ evmc_storage_status tx_control::set_value(uint64_t sequence, const evmc_bytes32&
 			//If current value is 0 (also means that new value is not 0), remove SSTORE_CLEARS_SCHEDULE
 			//gas from refund counter.
 			if(e.prev_value.size() == 0) {
-				sub_refund(SSTORE_CLEARS_SCHEDULE);
-			}
+				if(origin == new_value) {
+					return EVMC_STORAGE_DELETED_RESTORED;
+					//X -> 0 -> X refund = c.reset - c.warm_access - c.clear
+				} else {
+					return EVMC_STORAGE_DELETED_ADDED;
+					//X -> 0 -> Z refund = -c.clear
+				}
+			} else if(new_value.size() == 0) {
 			//If new value is 0 (also means that current value is not 0), add SSTORE_CLEARS_SCHEDULE
 			//gas to refund counter.
-			if(new_value.size() == 0) {
-				add_refund(SSTORE_CLEARS_SCHEDULE);
+				return EVMC_STORAGE_MODIFIED_DELETED;
+				//X -> Y -> 0 refund=c.clear
 			}
-		}
+		} else if(origin == new_value) {
 		//If original value equals new value (this storage slot is reset)
-		if(origin == new_value) {
 			//If original value is 0, add SSTORE_SET_GAS - SLOAD_GAS to refund counter.
-			if(origin.size() == 0) {
-				add_refund(SSTORE_SET_GAS - SLOAD_GAS);
+			if(origin.size() == 0) {//static_cast<int16_t>()
+				return EVMC_STORAGE_ADDED_DELETED;
+				//0 -> Y -> 0, refund=c.set - c.warm_access
 			} else {
 			//Otherwise, add SSTORE_RESET_GAS - SLOAD_GAS gas to refund counter.
-				add_refund(SSTORE_RESET_GAS - SLOAD_GAS);
+				return EVMC_STORAGE_MODIFIED_RESTORED; 
+				//X -> Y -> X (c.reset - c.warm_access)
 			}
 		}
-		return EVMC_STORAGE_MODIFIED_AGAIN;
+		return EVMC_STORAGE_ASSIGNED;
 	}
-}
-
-void tx_control::add_refund(uint64_t delta) {
-	journal_entry e {.type=REFUND_CHG};
-	e.refund_change.old_refund = cstate.refund;
-	cstate.refund += delta;
-	journal.push_back(e);
-}
-
-void tx_control::sub_refund(uint64_t delta) {
-	journal_entry e {.type=REFUND_CHG};
-	e.refund_change.old_refund = cstate.refund;
-	cstate.refund -= delta;
-	journal.push_back(e);
 }
 
 // ==============================================

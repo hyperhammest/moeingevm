@@ -206,9 +206,8 @@ protected:
 	void _undelete_bytecode(const evmc_address& addr, bool dirty);
 	void _unset_bytecode(const evmc_address& addr, bool dirty);
 public:
-	uint64_t refund;
 	cached_state(world_state_reader* r):
-		accounts(), creation_counters(), bytecodes(), values(), world(r), logs(), refund() {
+		accounts(), creation_counters(), bytecodes(), values(), world(r), logs() {
 		payload_data.reserve(2048);
 	}
 	const account_info& get_account(const evmc_address& addr);
@@ -256,7 +255,7 @@ public:
 		itx_call.flags = msg.flags;
 		itx_call.depth = msg.depth;
 		itx_call.gas = msg.gas;
-		itx_call.destination = msg.destination;
+		itx_call.destination = msg.recipient;
 		itx_call.sender = msg.sender;
 		itx_call.input_offset = payload_data.size();
 		itx_call.input_size = msg.input_size;
@@ -287,7 +286,6 @@ enum journal_type {
 	BYTECODE_DEL,
 	BYTECODE_CREATE,
 	CREATION_COUNTER_INCR,
-	REFUND_CHG,
 	LOG_QUEUE_ADD,
 };
 
@@ -339,10 +337,6 @@ struct journal_entry {
 			uint8_t lsb;
 			bool old_dirty;
 		} creation_counter_incr;
-
-		struct {
-			uint64_t old_refund;
-		} refund_change;
 	};
 	void revert(cached_state* state);
 };
@@ -402,7 +396,7 @@ public:
 		if(!executor) { // fall back to the interpreter
 			executor = execute_fn;
 		}
-		//std::cout<<"query "<<to_hex(msg->destination)<<" "<<size_t(executor)<<std::endl;
+		//std::cout<<"query "<<to_hex(msg->recipient)<<" "<<size_t(executor)<<std::endl;
 		return executor(vm, host, context, rev, msg, code, code_size);
 	}
 	// a snapshot is just a position of the journal entry list
@@ -472,8 +466,6 @@ public:
 	}
 	evmc_storage_status set_value(const evmc_address& addr, const evmc_bytes32& key, bytes_info value);
 	evmc_storage_status set_value(uint64_t sequence, const evmc_bytes32& key, bytes_info value);
-	void add_refund(uint64_t delta);
-	void sub_refund(uint64_t delta);
 
 	// just forward the function call to underlying cstate
 	void add_internal_tx_call(const evmc_message& msg) {
